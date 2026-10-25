@@ -1,0 +1,16 @@
+# 密钥绝不能提交
+config.json
+.env
+
+# 运行时数据
+state/
+workspace/
+__pycache__/
+
+# 用户数据（项目、信箱、回收站）不要提交
+项目/
+信箱/
+回收站/
+*.log
+bot.lock
+bot.pid

@@ -1,0 +1,122 @@
+{
+  "mock": false,
+  "projects_root": "",
+  "state_dir": "",
+  "default_agent": "gpt",
+  "max_rounds": 20,
+  "context_messages": 30,
+  "context_chars": 24000,
+  "memory_chars": 6000,
+  "travel_mode": false,
+  "discord": {
+    "bots": {
+      "claude": "在这里填「大小姐」机器人的令牌",
+      "gpt": "在这里填「GPT」机器人的令牌",
+      "deepseek": "在这里填「DeepSeek」机器人的令牌"
+    },
+    "listener": "gpt",
+    "bot_token": "",
+    "owner_user_id": "你自己的 Discord 用户 ID",
+    "project_category": "AI项目",
+    "ignore_channels": [],
+    "use_webhook": true
+  },
+  "host": {
+    "name": "my-pc",
+    "priority": 2,
+    "control_channel_id": ""
+  },
+  "claude": {
+    "command": "claude",
+    "allowed_tools": "WebSearch,WebFetch,Read,Glob,Grep",
+    "model": "opus",
+    "daily_limit": 0,
+    "timeout": 600,
+    "effort": "low",
+    "boost_effort": "high",
+    "quota_pause_minutes": 60
+  },
+  "gpt": {
+    "command": "codex",
+    "sandbox": "workspace-write",
+    "model": "",
+    "timeout": 1800,
+    "web_search": true,
+    "full_access": true,
+    "gated_features": [
+      "computer_use",
+      "browser_use",
+      "browser_use_external",
+      "in_app_browser"
+    ],
+    "guardian_off_when_approved": true,
+    "effort": "medium",
+    "boost_effort": "high"
+  },
+  "deepseek": {
+    "mode": "auto",
+    "dsh_command": "dsh",
+    "dsh_profile": "headless",
+    "api_key": "在这里填 DeepSeek API key",
+    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-flash",
+    "monthly_token_cap": 20000000,
+    "timeout": 300,
+    "web_search": true,
+    "search_model": "deepseek-v4-pro"
+  },
+  "git": {
+    "auto_init": true,
+    "auto_commit": true,
+    "auto_push": false
+  },
+  "roles": {},
+  "group_rules": "",
+  "consensus": {
+    "enabled": true,
+    "reviewers": [
+      "claude",
+      "deepseek"
+    ],
+    "max_rejects": 2
+  },
+  "summary": {
+    "enabled": true,
+    "trigger": 30,
+    "keep_recent": 12,
+    "max_chars": 1500
+  },
+  "context_by_agent": {
+    "claude": 12,
+    "gpt": 20,
+    "deepseek": 20
+  },
+  "sessions": {
+    "enabled": true,
+    "max_turns": 40
+  },
+  "budget_mode": true,
+  "budget_overrides": {
+    "default_agent": "deepseek",
+    "max_rounds": 20,
+    "context_by_agent": {
+      "claude": 10,
+      "gpt": 12,
+      "deepseek": 20
+    },
+    "gpt": {
+      "effort": "low",
+      "boost_effort": "medium"
+    },
+    "consensus": {
+      "reviewers_small": [
+        "deepseek"
+      ]
+    },
+    "final_summary_by": "deepseek"
+  },
+  "budget_rules": "",
+  "final_summary_by": "gpt",
+  "max_rounds_cap": 30,
+  "_说明": "projects_root 留空 = 放在程序文件夹里的「项目」文件夹；想放到别的盘就填路径，比如 D:/AIChat/项目。roles 留空 = 用程序内置的短版本角色说明；想自定义就填 claude/gpt/deepseek。group_rules 是你额外加的群规。"
+}
