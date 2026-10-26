@@ -11,6 +11,8 @@ if (-not (Test-RealPython)) {
   exit 1
 }
 Start-Process wscript -ArgumentList @('//nologo', "`"$(Join-Path $dir 'hidden.vbs')`"", "`"$(Join-Path $dir '后台运行.bat')`"")
+# 看门狗：程序卡死时自动重启（重复启动会自己退出）
+Start-Process powershell -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$(Join-Path $dir 'watchdog.ps1')`"")
 Write-Host ''
 Write-Host '  AI群聊 已在后台启动，这个窗口 5 秒后自动关闭。'
 Write-Host ''

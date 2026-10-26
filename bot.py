@@ -392,6 +392,19 @@ def run_discord(cfg):
                     await on_message(last[0])
 
     host.after_active = catch_up
+
+    alive_started = []
+
+    async def alive_loop():
+        """每 30 秒写一次 state/alive.txt；watchdog.ps1 发现它 5 分钟没更新（程序卡死）就强制重启。"""
+        if alive_started:
+            return
+        alive_started.append(1)
+        f = Path(cfg["state_dir"]) / "alive.txt"
+        while True:
+            with contextlib.suppress(Exception):
+                f.write_text(str(int(time.time())), encoding="utf-8")
+            await asyncio.sleep(30)
     usage = Usage(cfg["state_dir"])
     chats = {}       # 频道 ID -> GroupChat
     webhooks = {}    # 频道 ID -> Webhook 或 None
@@ -578,6 +591,7 @@ def run_discord(cfg):
                 log("模式：" + ("三个机器人" if multi else "单机器人 + webhook") + "；"
                     + (f"只管分类「{category}」下的频道。" if category else "所有文字频道都当作项目。"))
                 asyncio.create_task(host.run())
+                asyncio.create_task(alive_loop())
 
     for key, c in clients.items():
         make_ready(key, c)
