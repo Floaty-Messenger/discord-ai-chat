@@ -744,6 +744,108 @@ class Project:
 
 
 # ---------------------------------------------------------------- 群聊本体（每个项目一个）
+# ================================================================ 多台电脑同步（私人 GitHub 仓库）
+# 一个私人仓库装所有项目：每个项目一个分支 proj/<项目名>。值班的电脑上岗时先拉取，每轮聊完推送。
+SYNC_REMOTE = "sync"
+
+
+def sync_url(cfg):
+    s = cfg.get("sync") or {}
+    return (s.get("remote") or "").strip() if s.get("enabled", True) else ""
+
+
+def _g(cwd, *args, timeout=180):
+    return subprocess.run(["git", "-c", "user.name=AI群聊", "-c", "user.email=ai-group-chat@local", *args],
+                          cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          timeout=timeout)
+
+
+def _sync_branch(d):
+    return "proj/" + Path(d).name
+
+
+def _sync_prepare(cfg, d):
+    url = sync_url(cfg)
+    if not url or not shutil.which("git"):
+        return None
+    d = Path(d)
+    if not (d / ".git").exists():
+        _g(d, "init")
+    cur = _g(d, "remote", "get-url", SYNC_REMOTE)
+    if cur.returncode != 0:
+        _g(d, "remote", "add", SYNC_REMOTE, url)
+    elif cur.stdout.strip() != url:
+        _g(d, "remote", "set-url", SYNC_REMOTE, url)
+    return url
+
+
+def _sync_commit(d, msg):
+    _g(d, "add", "-A")
+    _g(d, "commit", "-q", "-m", msg)
+
+
+def _sync_merge(d):
+    """把远端这个项目的分支合进来；有冲突以远端为准（同一时间只有一台在干活，冲突很少）。"""
+    br = _sync_branch(d)
+    f = _g(d, "fetch", "-q", SYNC_REMOTE, br)
+    if f.returncode != 0:
+        return False  # 远端还没有这个项目
+    r = _g(d, "merge", "--no-edit", "-X", "theirs", "--allow-unrelated-histories", "FETCH_HEAD")
+    if r.returncode != 0:
+        _g(d, "merge", "--abort")
+        log(f"同步：项目「{Path(d).name}」合并失败，先保留本机版本：", (r.stderr or r.stdout).strip()[:200])
+    return True
+
+
+def sync_push(cfg, d, msg="群聊同步"):
+    """本机改动提交并推送到私人仓库（在后台线程里调用）。"""
+    try:
+        if not _sync_prepare(cfg, d):
+            return
+        _sync_commit(d, msg)
+        br = _sync_branch(d)
+        r = _g(d, "push", "-q", SYNC_REMOTE, f"HEAD:refs/heads/{br}")
+        if r.returncode != 0:  # 远端有本机没有的提交：先合并再推
+            _sync_merge(d)
+            r = _g(d, "push", "-q", SYNC_REMOTE, f"HEAD:refs/heads/{br}")
+        if r.returncode != 0:
+            log(f"同步：推送项目「{Path(d).name}」失败：", (r.stderr or r.stdout).strip()[:300])
+    except Exception as e:
+        log("同步推送出错：", e)
+
+
+def sync_pull_all(cfg):
+    """上岗前：拉取所有项目的最新版本；远端有、本机没有的项目直接下载；本机有、远端没有的推上去。"""
+    url = sync_url(cfg)
+    if not url or not shutil.which("git"):
+        return
+    root = Path(cfg["projects_root"])
+    try:
+        heads = _g(root, "ls-remote", "--heads", url)
+        if heads.returncode != 0:
+            log("同步：连不上私人仓库（没登录或网址不对）：", (heads.stderr or heads.stdout).strip()[:300])
+            return
+        remote = {line.split("refs/heads/proj/", 1)[1] for line in heads.stdout.splitlines()
+                  if "refs/heads/proj/" in line}
+        local = {d.name for d in root.iterdir() if d.is_dir() and not d.name.startswith(".")}
+        for name in sorted(local):
+            d = root / name
+            _sync_prepare(cfg, d)
+            _sync_commit(d, "上岗前保存本机改动")
+            if name in remote:
+                _sync_merge(d)
+            sync_push(cfg, d, "同步")
+        for name in sorted(remote - local):
+            r = _g(root, "clone", "-q", "-o", SYNC_REMOTE, "-b", f"proj/{name}", url, name)
+            if r.returncode == 0:
+                log(f"同步：从私人仓库下载了项目「{name}」")
+            else:
+                log(f"同步：下载项目「{name}」失败：", (r.stderr or r.stdout).strip()[:200])
+        log("同步：已拉取所有项目的最新版本")
+    except Exception as e:
+        log("同步拉取出错：", e)
+
+
 class GroupChat:
     def __init__(self, cfg, project_name, send, ping_user=None, usage=None, thinking=None,
                  delete_msgs=None, create_channel=None, choice=None, jump_url=None):
@@ -1592,9 +1694,11 @@ class GroupChat:
         except Exception as e:
             log("循环出错：", repr(e))
             await self.send("system", f"⚠️ 内部错误：{e}")
-        finally:  # 这一轮聊完了，后台顺手压缩旧消息（不占用对话）
+        finally:  # 这一轮聊完了，后台顺手压缩旧消息（不占用对话），再同步到私人仓库
             if not (self.sum_task and not self.sum_task.done()):
                 self.sum_task = asyncio.create_task(self._maybe_summarize())
+            if sync_url(self.cfg):
+                asyncio.create_task(asyncio.to_thread(sync_push, self.cfg, self.project.dir))
 
     # ---- 派活给大肥鱼：DeepSeek 在项目副本里干活，改动发回给派活的人检查，正式文件只由 GPT 经审核后合并
     async def _delegate(self, who, entry, queue):

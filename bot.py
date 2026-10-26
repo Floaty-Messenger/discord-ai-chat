@@ -14,7 +14,8 @@ import sys
 import time
 from pathlib import Path
 
-from core import DISPLAY, GroupChat, Usage, load_config, log, notice_snippet, save_setting
+from core import (DISPLAY, GroupChat, Usage, load_config, log, notice_snippet, save_setting,
+                  sync_pull_all, sync_url)
 
 DISCORD_LIMIT = 1900             # Discord 单条消息上限 2000 字，留点余量
 ATTACH_LIMIT = 20 * 1024 * 1024  # 免费用户单文件 20MB
@@ -195,7 +196,7 @@ class HostCoordinator:
     """
     BEAT, FRESH, GRACE, START_WAIT = 30, 100, 70, 8
 
-    def __init__(self, cfg, client, make_channel=None, on_stop=None):
+    def __init__(self, cfg, client, make_channel=None, on_stop=None, on_become_active=None):
         import socket
         h = cfg.get("host", {})
         self.name = socket.gethostname()
@@ -203,6 +204,7 @@ class HostCoordinator:
         self.priority = int((h.get("priorities") or {}).get(self.name, 1 if self.laptop else 2))
         self.channel_id = str(h.get("control_channel_id") or "")
         self.client, self.make_channel, self.on_stop = client, make_channel, on_stop
+        self.on_become_active = on_become_active  # 上岗前先从私人仓库拉取最新的项目和记忆
         self.active = False          # 先确认没人在值班再上岗，避免两台同时回复
         self.started = time.time()
         self.peers = {}              # 电脑名 -> (优先级, 最后心跳)
@@ -239,7 +241,7 @@ class HostCoordinator:
         except Exception as e:
             log("值班频道不可用，按单机模式运行：", e)
         if not self.ch:
-            self.active = True
+            await self._go_active()
             return
         log(f"本机「{self.name}」优先级 {self.priority}，正在确认有没有别的电脑在值班…")
         while True:
@@ -247,8 +249,8 @@ class HostCoordinator:
                 await self._tick()
             except Exception as e:
                 log("心跳出错：", e)
-                if not self.peers:  # 连值班频道都读不了：自己顶上
-                    self.active = True
+                if not self.peers and not self.active:  # 连值班频道都读不了：自己顶上
+                    await self._go_active()
             await asyncio.sleep(self.BEAT)
 
     async def _tick(self):
@@ -285,9 +287,21 @@ class HostCoordinator:
         better = any(self._key(n, v[0]) < mine for n, v in self.peers.items())
         # 刚启动、而别的电脑正在值班：先等它看到本机心跳主动让位，避免两台同时回复
         wait = self.peers and time.time() - self.started < self.GRACE
-        was, self.active = self.active, (not better and not wait)
-        if self.active != was:
-            log("本机切换为", "值班" if self.active else "待命")
+        want = not better and not wait
+        if want and not self.active:
+            await self._go_active()
+        elif not want and self.active:
+            self.active = False
+            log("本机切换为 待命")
+
+    async def _go_active(self):
+        if self.on_become_active:
+            try:
+                await self.on_become_active()
+            except Exception as e:
+                log("上岗前同步出错：", e)
+        self.active = True
+        log("本机切换为 值班")
 
 
 # ================================================================ Discord 模式：一个频道 = 一个项目
@@ -344,7 +358,13 @@ def run_discord(cfg):
         for c in clients.values():
             await c.close()
 
-    host = HostCoordinator(cfg, listener, make_control_channel, stop_everything)
+    async def become_active():
+        if sync_url(cfg):
+            log("同步：上岗前从私人仓库拉取最新的项目和记忆…")
+            await asyncio.to_thread(sync_pull_all, cfg)
+            chats.clear()  # 重新从硬盘读聊天记录和记忆
+
+    host = HostCoordinator(cfg, listener, make_control_channel, stop_everything, become_active)
     usage = Usage(cfg["state_dir"])
     chats = {}       # 频道 ID -> GroupChat
     webhooks = {}    # 频道 ID -> Webhook 或 None
@@ -607,8 +627,20 @@ def main():
     ap.add_argument("--local", action="store_true", help="终端模式，不连 Discord")
     ap.add_argument("--project", default="本地测试", help="终端模式下的项目名")
     ap.add_argument("--config", default=None)
+    ap.add_argument("--set-sync", default=None, metavar="网址", help="设置用来同步项目和记忆的私人 GitHub 仓库")
     args = ap.parse_args()
     cfg = load_config(args.config)
+    if args.set_sync is not None:
+        url = args.set_sync.strip()
+        save_setting(cfg, ["sync"], {"enabled": bool(url), "remote": url})
+        if not url:
+            print("已关闭同步。")
+            return
+        import subprocess
+        print("正在连接私人仓库（第一次会弹出 GitHub 登录，请登录）…")
+        r = subprocess.run(["git", "ls-remote", url], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        print("✅ 连接成功，同步已开启。" if r.returncode == 0 else "⚠️ 连接失败：" + (r.stderr or r.stdout).strip()[:300])
+        return
     if args.local:
         asyncio.run(run_local(cfg, args.project))
     else:

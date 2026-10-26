@@ -117,5 +117,9 @@
   "budget_rules": "",
   "final_summary_by": "gpt",
   "max_rounds_cap": 30,
-  "_说明": "projects_root 留空 = 放在程序文件夹里的「项目」文件夹；想放到别的盘就填路径，比如 D:/AIChat/项目。roles 留空 = 用程序内置的短版本角色说明；想自定义就填 claude/gpt/deepseek。group_rules 是你额外加的群规。 host.priorities 留空 = 笔记本优先值班、台式机待命；想手动指定就写 {\"电脑名\": 1}，数字小的优先。"
+  "_说明": "projects_root 留空 = 放在程序文件夹里的「项目」文件夹；想放到别的盘就填路径，比如 D:/AIChat/项目。roles 留空 = 用程序内置的短版本角色说明；想自定义就填 claude/gpt/deepseek。group_rules 是你额外加的群规。 host.priorities 留空 = 笔记本优先值班、台式机待命；想手动指定就写 {\"电脑名\": 1}，数字小的优先。",
+  "sync": {
+    "enabled": true,
+    "remote": ""
+  }
 }
