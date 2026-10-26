@@ -116,6 +116,9 @@ BAD_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
 # ---------------------------------------------------------------- 配置
+OLD_DEEPSEEK_MODELS = ("deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "deepseek-chat", "deepseek-reasoner")
+
+
 def load_config(path=None):
     path = Path(path or ROOT / "config.json")
     if not path.exists():
@@ -134,6 +137,10 @@ def load_config(path=None):
         cfg["projects_root"] = str(ROOT / "项目")
         Path(cfg["projects_root"]).mkdir(parents=True, exist_ok=True)
     Path(cfg["state_dir"]).mkdir(parents=True, exist_ok=True)
+    ds = cfg.get("deepseek") or {}
+    for k in ("model", "search_model"):  # 旧模型名统一换成 deepseek-flash（现在是 V4.1-Flash-1017，比 V4 Pro 便宜、能看图）
+        if ds.get(k) in OLD_DEEPSEEK_MODELS:
+            ds[k] = "deepseek-flash"
     if cfg.get("claude", {}).get("daily_limit") == 20 and not cfg.get("_limit_v2"):
         # 早期默认的"大小姐每天 20 次"已经取消：一次性改成不限次数（以后只在 Claude 真的报额度用完时暂停）
         cfg["claude"]["daily_limit"] = 0
@@ -526,7 +533,7 @@ class Agents:
             except Exception as e:
                 log("DeepSeek 联网搜索接口失败，改用普通接口（这次不能联网）：", str(e)[:200])
         body = json.dumps({
-            "model": c.get("model", "deepseek-v4-flash"),
+            "model": c.get("model", "deepseek-flash"),
             "messages": msgs,
             "stream": False,
         }).encode("utf-8")
@@ -551,7 +558,7 @@ class Agents:
         system = msgs[0]["content"] if msgs and msgs[0]["role"] == "system" else ""
         items = [{"role": m["role"], "content": m["content"]} for m in msgs if m["role"] != "system"]
         body = json.dumps({
-            "model": c.get("search_model", "deepseek-v4-pro"),
+            "model": c.get("search_model", "deepseek-flash"),
             "instructions": system,
             "input": items,
             "tools": [{"type": "web_search"}],
