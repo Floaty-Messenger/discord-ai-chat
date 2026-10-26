@@ -1599,13 +1599,20 @@ class GroupChat:
             left = f"（这个任务用户给了 {tm['rounds']} 轮以内，已用 {self.rounds} 轮）"
         if tm["phase"] == "independent" and who in tm["addressees"] and who not in tm["spoken"]:
             return ("【独立作答】请独立完成用户的要求，按用户要求的格式给出完整答案。你看不到其他 AI 这一轮的回答，"
-                    f"这一轮不要 @ 别人，也不要写 [完成]。{left}\n\n")
+                    "这一轮不要 @ 别人，也不要写 [完成]。关键事实注明来源（链接+日期）；"
+                    f"如果用户的问题本身带着可疑的前提，先指出来。{left}\n\n")
         if tm["phase"] == "discuss" and who in tm["addressees"]:
+            if not tm.get("contrarian"):  # 每个任务轮流指定一个"唱反调的人"，防止大家互相强化同一个错误
+                tm["contrarian"] = tm["addressees"][int(time.time()) % len(tm["addressees"])]
+            devil = ("你是这一轮的【唱反调的人】：专门挑战大家都同意的观点和共同前提，找反例和反证；"
+                     "确实挑不出毛病就明说，不要硬杠。") if who == tm["contrarian"] else ""
             return ("【交叉讨论】按用户的要求互相审查：指出别人和自己方案的问题，可以改变立场但要说理由，"
-                    f"需要谁回应就 @ 谁。不要写 [完成]，讨论结束后会有人给用户汇总。{left}\n\n")
+                    "改变立场要靠新证据，不是因为别人都这么说；几个人引用同一个来源只算一份证据。"
+                    f"{devil}需要谁回应就 @ 谁。不要写 [完成]，讨论结束后会有人给用户汇总。{left}\n\n")
         if tm["phase"] == "summary" and who == tm["summarizer"]:
             return ("【最终汇总】讨论结束了。请直接回答用户最初的问题，按他要求的格式给出最终结论；"
-                    "列出各方的主要分歧和你的取舍理由。写完在末尾写 [完成]。\n\n")
+                    "把结论分成「有来源支持」（附链接）和「推测、未核实」两类；几个人引用同一个来源的，标明只算一份证据；"
+                    "列出各方的主要分歧、唱反调的人提出且没被驳倒的问题，以及你的取舍理由。写完在末尾写 [完成]。\n\n")
         return ""
 
     async def _notify(self, msg, kind, mention):
