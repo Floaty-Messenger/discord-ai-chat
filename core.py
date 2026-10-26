@@ -138,9 +138,8 @@ def load_config(path=None):
         Path(cfg["projects_root"]).mkdir(parents=True, exist_ok=True)
     Path(cfg["state_dir"]).mkdir(parents=True, exist_ok=True)
     ds = cfg.get("deepseek") or {}
-    for k in ("model", "search_model"):  # 旧模型名统一换成 deepseek-flash（现在是 V4.1-Flash-1017，比 V4 Pro 便宜、能看图）
-        if ds.get(k) in OLD_DEEPSEEK_MODELS:
-            ds[k] = "deepseek-flash"
+    if ds.get("model") in OLD_DEEPSEEK_MODELS:  # 旧模型名统一换成 deepseek-flash（现在是 V4.1-Flash-1017）
+        ds["model"] = "deepseek-flash"
     if cfg.get("claude", {}).get("daily_limit") == 20 and not cfg.get("_limit_v2"):
         # 早期默认的"大小姐每天 20 次"已经取消：一次性改成不限次数（以后只在 Claude 真的报额度用完时暂停）
         cfg["claude"]["daily_limit"] = 0
@@ -500,10 +499,10 @@ class Agents:
         if self.cfg.get("mock"):
             return "- （模拟摘要）" + str(prompt.count("[#")) + " 条旧消息的要点"
         if self._ds_key():
-            return await self._deepseek_api(system, prompt)
+            return await self._deepseek_api(system, prompt, search=False)
         return await self._deepseek(system, prompt, workdir)
 
-    async def _deepseek_api(self, system_prompt, prompt, session=None):
+    async def _deepseek_api(self, system_prompt, prompt, session=None, search=True):
         """session = 这个项目的对话文件。API 本身不记事，所以程序把整段对话存下来每次一起发；
         前面不变的部分 DeepSeek 会自动缓存，按"缓存命中"的便宜价格计费。"""
         c = self.cfg["deepseek"]
@@ -522,73 +521,91 @@ class Agents:
         if not msgs:
             msgs = [{"role": "system", "content": system_prompt}]
         msgs.append({"role": "user", "content": prompt})
-        if c.get("web_search", True):
-            try:
-                text = await self._deepseek_responses(c, key, msgs)
-                if session:
-                    msgs.append({"role": "assistant", "content": text})
-                    Path(session).write_text(json.dumps(msgs, ensure_ascii=False), encoding="utf-8")
-                    self.last_session["deepseek"] = session
-                return text
-            except Exception as e:
-                log("DeepSeek 联网搜索接口失败，改用普通接口（这次不能联网）：", str(e)[:200])
-        body = json.dumps({
-            "model": c.get("model", "deepseek-flash"),
-            "messages": msgs,
-            "stream": False,
-        }).encode("utf-8")
-        url = c.get("base_url", "https://api.deepseek.com").rstrip("/") + "/chat/completions"
-        req = urllib.request.Request(url, data=body, headers={
-            "Content-Type": "application/json", "Authorization": f"Bearer {key}"})
-
-        def call():
-            with urllib.request.urlopen(req, timeout=c.get("timeout", 300)) as r:
-                return json.loads(r.read().decode("utf-8"))
-        j = await asyncio.to_thread(call)
-        self.usage.add_deepseek((j.get("usage") or {}).get("total_tokens", 0))
-        text = j["choices"][0]["message"]["content"].strip()
+        text = await self._deepseek_chat(c, key, msgs, search and c.get("web_search", True))
         if session:
             msgs.append({"role": "assistant", "content": text})
             Path(session).write_text(json.dumps(msgs, ensure_ascii=False), encoding="utf-8")
             self.last_session["deepseek"] = session
         return text
 
-    async def _deepseek_responses(self, c, key, msgs):
-        """DeepSeek 的 Responses 接口：服务器端联网搜索（不需要额外的搜索 key）。"""
-        system = msgs[0]["content"] if msgs and msgs[0]["role"] == "system" else ""
-        items = [{"role": m["role"], "content": m["content"]} for m in msgs if m["role"] != "system"]
-        body = json.dumps({
-            "model": c.get("search_model", "deepseek-flash"),
-            "instructions": system,
-            "input": items,
-            "tools": [{"type": "web_search"}],
-            "stream": False,
-        }).encode("utf-8")
-        url = c.get("base_url", "https://api.deepseek.com").rstrip("/") + "/responses"
-        req = urllib.request.Request(url, data=body, headers={
-            "Content-Type": "application/json", "Authorization": f"Bearer {key}"})
+    DS_TOOLS = [
+        {"type": "function", "function": {
+            "name": "web_search",
+            "description": "联网搜索最新信息，返回标题、链接、日期和摘要。可以用 site: lang: after: before: 等写法。",
+            "parameters": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "搜索词，最多 128 个字"},
+                "count": {"type": "integer", "description": "要几条结果，默认 8"}},
+                "required": ["query"]}}},
+        {"type": "function", "function": {
+            "name": "web_fetch",
+            "description": "读取一个网页的正文（Markdown），用来核实搜索结果里的细节。",
+            "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}}},
+    ]
 
-        def call():
-            with urllib.request.urlopen(req, timeout=c.get("timeout", 300)) as r:
-                return json.loads(r.read().decode("utf-8"))
-        j = await asyncio.to_thread(call)
-        u = j.get("usage") or {}
-        self.usage.add_deepseek(u.get("total_tokens") or (u.get("input_tokens", 0) + u.get("output_tokens", 0)))
-        text = j.get("output_text") or ""
-        if not text:
-            parts = []
-            for item in j.get("output") or []:
-                if item.get("type") == "message":
-                    for cpart in item.get("content") or []:
-                        if cpart.get("type") in ("output_text", "text") and cpart.get("text"):
-                            parts.append(cpart["text"])
-            text = "\n".join(parts)
-        searched = sum(1 for item in (j.get("output") or []) if item.get("type") == "web_search_call")
-        if searched:
-            log(f"DeepSeek 联网搜索了 {searched} 次")
-        if not text.strip():
-            raise RuntimeError("Responses 接口没有返回文字")
-        return text.strip()
+    def _ds_post(self, c, key, path, payload, timeout=None):
+        url = c.get("base_url", "https://api.deepseek.com").rstrip("/") + path
+        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={
+            "Content-Type": "application/json", "Authorization": f"Bearer {key}"})
+        with urllib.request.urlopen(req, timeout=timeout or c.get("timeout", 300)) as r:
+            return json.loads(r.read().decode("utf-8"))
+
+    def _ds_tool(self, c, key, name, args):
+        """和本地 DSH 一样：用 DeepSeek 官方的 Search / Fetch 接口联网。"""
+        try:
+            if name == "web_search":
+                q = str(args.get("query", "")).strip()[:128]
+                n = max(1, min(int(args.get("count") or 8), 15))
+                j = self._ds_post(c, key, "/v1/tools/search", {"query": q, "count": n}, 60)
+                rows = []
+                for r in (j.get("results") or [])[:n]:
+                    rows.append(f"- {r.get('title', '')}\n  {r.get('url', '')}\n  日期：{r.get('date') or '未知'}"
+                                f"\n  {(r.get('summary') or r.get('snippet') or '')[:400]}")
+                return "\n".join(rows) or "（没有搜到结果）"
+            if name == "web_fetch":
+                j = self._ds_post(c, key, "/v1/tools/fetch", {"url": str(args.get("url", ""))}, 60)
+                return (f"# {j.get('title', '')}\n" + (j.get("content") or ""))[:12000] or "（网页没有内容）"
+            return f"（没有这个工具：{name}）"
+        except Exception as e:
+            return f"（工具出错：{str(e)[:200]}）"
+
+    async def _deepseek_chat(self, c, key, msgs, tools):
+        """Chat Completions + 函数调用：模型想搜就搜、想读网页就读，最多 8 步，最后给出回答。"""
+        model = c.get("model", "deepseek-flash")
+        work = list(msgs)
+        searched = 0
+        for step in range(9):
+            payload = {"model": model, "messages": work, "stream": False}
+            if tools and step < 8:
+                payload["tools"] = self.DS_TOOLS
+            try:
+                j = await asyncio.to_thread(self._ds_post, c, key, "/chat/completions", payload)
+            except Exception as e:
+                if tools and "tools" in payload:  # 工具调用出错：这次不联网，普通回答
+                    log("DeepSeek 带搜索的调用失败，这次不联网：", str(e)[:200])
+                    tools = False
+                    continue
+                raise
+            self.usage.add_deepseek((j.get("usage") or {}).get("total_tokens", 0))
+            m = j["choices"][0]["message"]
+            calls = m.get("tool_calls") or []
+            if not calls:
+                if searched:
+                    log(f"DeepSeek 联网用了 {searched} 次搜索/读网页")
+                text = (m.get("content") or "").strip()
+                if not text:
+                    raise RuntimeError("DeepSeek 没有返回文字")
+                return text
+            work.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": calls})
+            for tc in calls:
+                fn = tc.get("function") or {}
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except Exception:
+                    args = {}
+                out = await asyncio.to_thread(self._ds_tool, c, key, fn.get("name"), args)
+                searched += 1
+                work.append({"role": "tool", "tool_call_id": tc.get("id"), "content": out})
+        raise RuntimeError("DeepSeek 搜索步骤太多，没有给出回答")
 
     async def _mock(self, who, prompt):
         # 测试用的假 AI：按固定剧本互相 @，用来检查接力、停止规则和记忆

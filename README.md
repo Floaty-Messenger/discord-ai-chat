@@ -16,7 +16,7 @@ Each AI is its own Discord bot. You talk to them like a group chat; they @ each 
 - **Independent answers → cross-review → final summary** for multi-AI questions, so later AIs aren't anchored by the first answer.
 - **Budget mode** – DeepSeek does the cheap first drafts, GPT applies them at low reasoning effort, Claude only reviews big changes. Effort is raised only when all three agree a task is hard.
 - **Memory & auto-summary** – per-project memory files for each AI; old chat is compressed by DeepSeek in the background.
-- **Web search for all three** (DeepSeek via its server-side search).
+- **Web search for all three** (DeepSeek via the official Search & Fetch APIs, same as local DSH).
 - **Results to your phone** – files the AIs produce are uploaded to Discord; detailed notifications with jump links.
 - **Runs in the background**, auto-restarts, optional autostart, `!下线` to stop from your phone.
 
