@@ -211,6 +211,8 @@ class HostCoordinator:
         self.my_msg = None
         self.ch = None
         self.running = False
+        self.waiting = False
+        self.after_active = None     # 上岗后：补回交接时没人接的消息
 
     def _key(self, name, prio):
         return (prio, name)
@@ -251,7 +253,7 @@ class HostCoordinator:
                 log("心跳出错：", e)
                 if not self.peers and not self.active:  # 连值班频道都读不了：自己顶上
                     await self._go_active()
-            await asyncio.sleep(self.BEAT)
+            await asyncio.sleep(5 if self.waiting else self.BEAT)  # 等交接时勤快点看
 
     async def _tick(self):
         now = int(time.time())
@@ -282,17 +284,21 @@ class HostCoordinator:
                     await m.delete()
                 continue
             if name and now - ts < self.FRESH and name not in self.peers:
-                self.peers[name] = (int(kv.get("priority", 99)), ts)
+                self.peers[name] = (int(kv.get("priority", 99)), ts, kv.get("active") == "1")
         mine = self._key(self.name, self.priority)
         better = any(self._key(n, v[0]) < mine for n, v in self.peers.items())
-        # 刚启动、而别的电脑正在值班：先等它看到本机心跳主动让位，避免两台同时回复
-        wait = self.peers and time.time() - self.started < self.GRACE
-        want = not better and not wait
+        # 别的电脑还在值班：等它看到本机心跳、主动让位（它会立刻把心跳改成 active=0），最多等 GRACE 秒
+        busy = any(v[2] for v in self.peers.values())
+        self.waiting = bool(not better and busy and time.time() - self.started < self.GRACE)
+        want = not better and not self.waiting
         if want and not self.active:
             await self._go_active()
         elif not want and self.active:
             self.active = False
             log("本机切换为 待命")
+            with contextlib.suppress(Exception):  # 马上告诉别的电脑：我已经让位了
+                await self.my_msg.edit(content=f"HEARTBEAT name={self.name} priority={self.priority} "
+                                               f"active=0 ts={int(time.time())}")
 
     async def _go_active(self):
         if self.on_become_active:
@@ -302,6 +308,9 @@ class HostCoordinator:
                 log("上岗前同步出错：", e)
         self.active = True
         log("本机切换为 值班")
+        if self.after_active:
+            with contextlib.suppress(Exception):
+                await self.after_active()
 
 
 # ================================================================ Discord 模式：一个频道 = 一个项目
@@ -365,6 +374,24 @@ def run_discord(cfg):
             chats.clear()  # 重新从硬盘读聊天记录和记忆
 
     host = HostCoordinator(cfg, listener, make_control_channel, stop_everything, become_active)
+
+    async def catch_up():
+        """交接的那一会儿没人值班：各项目频道里最后一条如果是你 3 分钟内发的、还没人回，就补上。"""
+        import datetime
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for g in listener.guilds:
+            for ch in g.text_channels:
+                if not is_project_channel(ch):
+                    continue
+                try:
+                    last = [m async for m in ch.history(limit=1)]
+                except Exception:
+                    continue
+                if last and last[0].author.id == owner_id and (now - last[0].created_at).total_seconds() < 180:
+                    log(f"补回交接时没人接的消息：#{ch.name}")
+                    await on_message(last[0])
+
+    host.after_active = catch_up
     usage = Usage(cfg["state_dir"])
     chats = {}       # 频道 ID -> GroupChat
     webhooks = {}    # 频道 ID -> Webhook 或 None
