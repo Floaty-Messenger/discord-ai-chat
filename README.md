@@ -22,7 +22,7 @@ Each AI is its own Discord bot. You talk to them like a group chat; they @ each 
 
 ## Requirements
 
-- Windows 10/11, Python 3.10+
+- Windows 10/11 (install.bat installs Python if it is missing)
 - [Claude Code](https://code.claude.com/docs/en/setup) logged in with a Claude Pro/Max account (`claude auth login`)
 - [Codex CLI](https://github.com/openai/codex) logged in with ChatGPT (`codex login`)
 - A DeepSeek API key ([platform.deepseek.com](https://platform.deepseek.com))
@@ -67,7 +67,7 @@ License: MIT
 
 ### 需要准备
 
-- Windows 10/11，Python 3.10 以上
+- Windows 10/11（没有 Python 的话 install.bat 会自动装）
 - Claude Pro/Max 账号（命令行登录 `claude auth login`）
 - ChatGPT 账号（`codex login`）
 - DeepSeek API key
