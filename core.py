@@ -723,7 +723,7 @@ class Project:
                              encoding="utf-8")
         if first and cfg.get("git", {}).get("auto_init", True) and shutil.which("git"):
             if not (self.dir / ".git").exists():
-                subprocess.run(["git", "init"], cwd=self.dir, capture_output=True)
+                subprocess.run(["git", "-c", "safe.directory=*", "init"], cwd=self.dir, capture_output=True)
                 log(f"新项目「{self.name}」已创建并初始化 git：{self.dir}")
 
     def memory_path(self, who):
@@ -755,7 +755,7 @@ def sync_url(cfg):
 
 
 def _g(cwd, *args, timeout=180):
-    return subprocess.run(["git", "-c", "user.name=AI群聊", "-c", "user.email=ai-group-chat@local", *args],
+    return subprocess.run(["git", "-c", "safe.directory=*", "-c", "user.name=AI群聊", "-c", "user.email=ai-group-chat@local", *args],
                           cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
                           timeout=timeout)
 
@@ -1836,19 +1836,19 @@ class GroupChat:
         if not g.get("auto_commit", True) or not (wd / ".git").exists():
             return
         try:
-            st = subprocess.run(["git", "status", "--porcelain"], cwd=wd,
+            st = subprocess.run(["git", "-c", "safe.directory=*", "status", "--porcelain"], cwd=wd,
                                 capture_output=True, text=True, encoding="utf-8")
             if not st.stdout.strip():
                 return
-            subprocess.run(["git", "add", "-A"], cwd=wd, capture_output=True)
+            subprocess.run(["git", "-c", "safe.directory=*", "add", "-A"], cwd=wd, capture_output=True)
             title = (reply.strip().splitlines() or ["GPT 修改"])[0][:60]
-            r = subprocess.run(["git", "commit", "-m", f"GPT: {title}"], cwd=wd,
+            r = subprocess.run(["git", "-c", "safe.directory=*", "commit", "-m", f"GPT: {title}"], cwd=wd,
                                capture_output=True, text=True, encoding="utf-8")
             if r.returncode != 0:
                 log("git 提交失败：", (r.stderr or r.stdout).strip()[:300])
                 return
             if g.get("auto_push"):
-                subprocess.run(["git", "push"], cwd=wd, capture_output=True)
+                subprocess.run(["git", "-c", "safe.directory=*", "push"], cwd=wd, capture_output=True)
             log(f"[{self.project.name}] 已自动提交 git")
         except Exception as e:
             log("git 提交失败：", e)
