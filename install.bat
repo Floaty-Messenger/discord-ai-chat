@@ -40,7 +40,13 @@ for /f "delims=" %%p in ('powershell -NoProfile -Command "[Environment]::GetEnvi
 for /f "delims=" %%p in ('powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('Path','Machine')"') do set "PATH=%%p;%PATH%"
 if exist "%USERPROFILE%\.local\bin\claude.exe" set "PATH=%USERPROFILE%\.local\bin;%PATH%"
 
-echo [4/6] 安装 Python 依赖...
+echo [4/6] 检查 Python，安装依赖...
+python --version >nul 2>nul
+if errorlevel 1 (
+  echo     没有 Python，用 winget 安装 Python 3.11...
+  winget install --id Python.Python.3.11 -e --scope user --accept-source-agreements --accept-package-agreements
+)
+if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PATH=%LOCALAPPDATA%\Programs\Python\Python311;%LOCALAPPDATA%\Programs\Python\Python311\Scripts;%PATH%"
 python -m pip install -r requirements.txt
 echo.
 
@@ -75,7 +81,7 @@ if errorlevel 1 (
   echo  如果上面报错：关掉这个窗口，新开一个命令行，输入 claude 回车，按提示在浏览器里登录。
 )
 echo.
-echo  再登录 Codex（选 Sign in with ChatGPT，用你的 GPT Pro 账号）...
+echo  再登录 Codex（选 Sign in with ChatGPT，用你的 ChatGPT 账号）...
 codex login
 echo.
 

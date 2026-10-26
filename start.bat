@@ -6,5 +6,6 @@ set PYTHONUTF8=1
 rem Claude Code 和 Codex 的安装目录，防止 PATH 里没有
 set "PATH=%USERPROFILE%\.local\bin;%APPDATA%\npm;%LOCALAPPDATA%\Programs\OpenAI\Codex\bin;%PATH%"
 for /f "delims=" %%p in ('powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('Path','User')"') do set "PATH=%%p;%PATH%"
+if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PATH=%LOCALAPPDATA%\Programs\Python\Python311;%LOCALAPPDATA%\Programs\Python\Python311\Scripts;%PATH%"
 python bot.py %*
 if not defined NOPAUSE pause
