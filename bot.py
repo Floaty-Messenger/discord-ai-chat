@@ -164,53 +164,130 @@ async def run_local(cfg, project):
 
 
 # ================================================================ 交接班（预留接口）
+CONTROL_NAME = "群聊值班"
+
+
+def _has_battery():
+    """有电池 = 笔记本：更省电，优先值班。"""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        class _S(ctypes.Structure):
+            _fields_ = [("ac", ctypes.c_ubyte), ("flag", ctypes.c_ubyte), ("pct", ctypes.c_ubyte),
+                        ("saver", ctypes.c_ubyte), ("life", ctypes.c_ulong), ("full", ctypes.c_ulong)]
+        st = _S()
+        if not ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(st)):
+            return False
+        return st.flag not in (128, 255)
+    except Exception:
+        return False
+
+
 class HostCoordinator:
     """
-    多台电脑轮流值班。没有填 control_channel_id 时，永远认为自己在值班（单机模式）。
-    填了以后：每台电脑定时在控制频道里更新一条心跳消息；
-    如果有优先级更高（数字更小）的电脑在 3 分钟内有心跳，本机就待命不回复。
-    —— 第一版只在一台电脑上跑，这部分还没有实测。
+    多台电脑同时开着时，只让一台回复（值班），其他待命。
+    - 每台电脑每 30 秒在「群聊值班」频道里更新自己的心跳（频道自动创建）。
+    - 优先级数字小的先值班：笔记本 1、台式机 2（config 的 host.priorities 可以按电脑名覆盖）。同级按电脑名排。
+    - 值班的电脑 100 秒没心跳，下一台自动接手；它回来后再交还。
+    - !下线 会通知所有电脑一起下线。
     """
-    def __init__(self, cfg, client):
+    BEAT, FRESH, GRACE, START_WAIT = 30, 100, 70, 8
+
+    def __init__(self, cfg, client, make_channel=None, on_stop=None):
+        import socket
         h = cfg.get("host", {})
-        self.name = h.get("name", "pc")
-        self.priority = int(h.get("priority", 10))
+        self.name = socket.gethostname()
+        self.laptop = _has_battery()
+        self.priority = int((h.get("priorities") or {}).get(self.name, 1 if self.laptop else 2))
         self.channel_id = str(h.get("control_channel_id") or "")
-        self.client = client
-        self.active = True
+        self.client, self.make_channel, self.on_stop = client, make_channel, on_stop
+        self.active = False          # 先确认没人在值班再上岗，避免两台同时回复
+        self.started = time.time()
+        self.peers = {}              # 电脑名 -> (优先级, 最后心跳)
         self.my_msg = None
-        self.on_become_active = None  # 以后在这里 git pull，同步各项目的记忆和聊天记录
+        self.ch = None
+        self.running = False
+
+    def _key(self, name, prio):
+        return (prio, name)
+
+    def describe(self):
+        now = time.time()
+        live = {n: v for n, v in self.peers.items() if now - v[1] < self.FRESH}
+        me = f"本机：{self.name}（{'笔记本' if self.laptop else '台式机'}，优先级 {self.priority}）" \
+             + ("，正在值班" if self.active else "，待命中")
+        others = "；".join(f"{n}（优先级 {v[0]}）" for n, v in live.items()) or "无"
+        return f"🖥 {me}\n其他在线电脑：{others}"
+
+    async def stop_all(self):
+        """!下线：通知其他电脑一起下线。"""
+        if self.ch:
+            with contextlib.suppress(Exception):
+                await self.ch.send(f"STOP from={self.name} ts={int(time.time())}")
 
     async def run(self):
-        if not self.channel_id:
+        if self.running:
             return
-        ch = await self.client.fetch_channel(int(self.channel_id))
+        self.running = True
+        try:
+            if self.channel_id:
+                self.ch = await self.client.fetch_channel(int(self.channel_id))
+            elif self.make_channel:
+                self.ch = await self.make_channel()
+        except Exception as e:
+            log("值班频道不可用，按单机模式运行：", e)
+        if not self.ch:
+            self.active = True
+            return
+        log(f"本机「{self.name}」优先级 {self.priority}，正在确认有没有别的电脑在值班…")
         while True:
             try:
-                stamp = f"HEARTBEAT name={self.name} priority={self.priority} ts={int(time.time())}"
-                if self.my_msg:
-                    await self.my_msg.edit(content=stamp)
-                else:
-                    self.my_msg = await ch.send(stamp)
-                better = False
-                async for m in ch.history(limit=30):
-                    if m.id == self.my_msg.id or not m.content.startswith("HEARTBEAT"):
-                        continue
-                    kv = dict(p.split("=", 1) for p in m.content.split()[1:] if "=" in p)
-                    if kv.get("name") == self.name:
-                        continue
-                    fresh = time.time() - int(kv.get("ts", 0)) < 180
-                    if fresh and int(kv.get("priority", 99)) < self.priority:
-                        better = True
-                was = self.active
-                self.active = not better
-                if self.active != was:
-                    log("切换为", "值班" if self.active else "待命")
-                    if self.active and self.on_become_active:
-                        await self.on_become_active()
+                await self._tick()
             except Exception as e:
                 log("心跳出错：", e)
-            await asyncio.sleep(60)
+                if not self.peers:  # 连值班频道都读不了：自己顶上
+                    self.active = True
+            await asyncio.sleep(self.BEAT)
+
+    async def _tick(self):
+        now = int(time.time())
+        stamp = f"HEARTBEAT name={self.name} priority={self.priority} active={int(self.active)} ts={now}"
+        if self.my_msg:
+            await self.my_msg.edit(content=stamp)
+        else:
+            self.my_msg = await self.ch.send(stamp)
+            await asyncio.sleep(self.START_WAIT)  # 两台同时开机时，给对方一点时间也发出心跳
+        self.peers = {}
+        async for m in self.ch.history(limit=50):
+            if m.id == self.my_msg.id:
+                continue
+            words = m.content.split()
+            if not words or words[0] not in ("HEARTBEAT", "STOP"):
+                continue
+            kv = dict(x.split("=", 1) for x in words[1:] if "=" in x)
+            if words[0] == "STOP":
+                if int(kv.get("ts", 0)) > self.started and kv.get("from") != self.name:
+                    log(f"电脑「{kv.get('from')}」发了 !下线，本机也下线")
+                    if self.on_stop:
+                        await self.on_stop()
+                    return
+                continue
+            name, ts = kv.get("name"), int(kv.get("ts", 0))
+            if name == self.name:  # 本机上次运行留下的旧心跳，清掉
+                with contextlib.suppress(Exception):
+                    await m.delete()
+                continue
+            if name and now - ts < self.FRESH and name not in self.peers:
+                self.peers[name] = (int(kv.get("priority", 99)), ts)
+        mine = self._key(self.name, self.priority)
+        better = any(self._key(n, v[0]) < mine for n, v in self.peers.items())
+        # 刚启动、而别的电脑正在值班：先等它看到本机心跳主动让位，避免两台同时回复
+        wait = self.peers and time.time() - self.started < self.GRACE
+        was, self.active = self.active, (not better and not wait)
+        if self.active != was:
+            log("本机切换为", "值班" if self.active else "待命")
 
 
 # ================================================================ Discord 模式：一个频道 = 一个项目
@@ -246,7 +323,28 @@ def run_discord(cfg):
         clients[key] = discord.Client(intents=intents)
     listener = clients[listener_key]
 
-    host = HostCoordinator(cfg, listener)
+    async def make_control_channel():
+        maker = clients.get("claude", listener) if multi else listener
+        await maker.wait_until_ready()
+        guild = next(iter(maker.guilds), None)
+        if guild is None:
+            return None
+        ch = discord.utils.get(guild.text_channels, name=CONTROL_NAME)
+        if ch is None:
+            try:
+                ch = await guild.create_text_channel(CONTROL_NAME, topic="多台电脑轮流值班用的，程序自动维护，不用在这里说话")
+            except discord.Forbidden:
+                log("没有权限建「群聊值班」频道（需要大小姐机器人的「管理频道」权限），按单机模式运行")
+                return None
+        ignore.add(str(ch.id))
+        return listener.get_channel(ch.id) or await listener.fetch_channel(ch.id)
+
+    async def stop_everything():
+        (Path(cfg["state_dir"]) / "stop.flag").write_text("stop", encoding="utf-8")
+        for c in clients.values():
+            await c.close()
+
+    host = HostCoordinator(cfg, listener, make_control_channel, stop_everything)
     usage = Usage(cfg["state_dir"])
     chats = {}       # 频道 ID -> GroupChat
     webhooks = {}    # 频道 ID -> Webhook 或 None
@@ -455,7 +553,8 @@ def run_discord(cfg):
             return
         if text in ("!下线", "!关机"):
             (Path(cfg["state_dir"]) / "stop.flag").write_text("stop", encoding="utf-8")
-            await post(m.channel, "system", "👋 群聊已下线。想重新上线：双击桌面上的「AI群聊 - Discord」。", {})
+            await host.stop_all()
+            await post(m.channel, "system", "👋 群聊已下线（所有电脑一起）。想重新上线：在任意一台电脑上双击「AI群聊 - Discord」。", {})
             log("收到 !下线，正在退出")
             for c in clients.values():
                 await c.close()
@@ -471,6 +570,8 @@ def run_discord(cfg):
             await post(m.channel, "system", r, {})
             return
         r = handle_command(chat, cfg, text)
+        if r is not None and text in ("!状态", "!status"):
+            r += "\n" + host.describe()
         if r is not None:
             await post(m.channel, "system", r, {})
             return
