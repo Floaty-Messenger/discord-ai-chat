@@ -148,6 +148,23 @@ def load_config(path=None):
             save_setting(cfg, ["_limit_v2"], True)
         except Exception:
             pass
+    if not cfg.get("_gpt_effort_v2"):
+        # 用户要求：GPT 平时用高强度思考，难任务（三方同意升级）用极高，别让思考强度拖累项目
+        for keys in (["gpt"], ["budget_overrides", "gpt"]):
+            node = cfg
+            for k in keys:
+                node = node.setdefault(k, {})
+            node["effort"], node["boost_effort"] = "high", "xhigh"
+            try:
+                save_setting(cfg, keys + ["effort"], "high")
+                save_setting(cfg, keys + ["boost_effort"], "xhigh")
+            except Exception:
+                pass
+        cfg["_gpt_effort_v2"] = True
+        try:
+            save_setting(cfg, ["_gpt_effort_v2"], True)
+        except Exception:
+            pass
     roles = cfg.get("roles") or {}
     budget = bool(cfg.get("budget_mode"))
     base = ROLES_BUDGET if budget else ROLES_DEFAULT
@@ -398,7 +415,7 @@ class Agents:
             raise RuntimeError(_error_lines(err or out))
         return out.strip()
 
-    async def _gpt(self, system_prompt, prompt, workdir, write=False, session=None):
+    async def _gpt(self, system_prompt, prompt, workdir, write=False, session=None, effort=None):
         c = self.cfg["gpt"]
         last = _tmpfile(self.cfg["state_dir"], ".txt")
         # 开了"三方商讨"时，只有方案通过的那一轮才给写权限，其他时候只读
@@ -427,7 +444,7 @@ class Agents:
             args += ["-c", "features.guardian_approval=false"]
         if c.get("model"):
             args += ["-m", c["model"]]
-        eff = self._effort("gpt")
+        eff = effort or self._effort("gpt")
         if eff:
             args += ["-c", f"model_reasoning_effort={eff}"]
         if session:
@@ -457,6 +474,10 @@ class Agents:
                 self.last_session["gpt"] = session
             text = text or last_msg
             if code != 0 and not text:
+                if eff == "xhigh":  # 当前模型不支持"极高"：这次改用"高"再试一次
+                    log("GPT 极高强度调用失败，改用高强度重试：", _error_lines(err or out)[:200])
+                    _rm(last)
+                    return await self._gpt(system_prompt, prompt, workdir, write, session, effort="high")
                 raise RuntimeError(_error_lines(err or out))
             return text
         finally:

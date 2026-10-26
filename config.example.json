@@ -49,8 +49,8 @@
       "in_app_browser"
     ],
     "guardian_off_when_approved": true,
-    "effort": "medium",
-    "boost_effort": "high"
+    "effort": "high",
+    "boost_effort": "xhigh"
   },
   "deepseek": {
     "mode": "auto",
@@ -103,8 +103,8 @@
       "deepseek": 20
     },
     "gpt": {
-      "effort": "low",
-      "boost_effort": "medium"
+      "effort": "high",
+      "boost_effort": "xhigh"
     },
     "consensus": {
       "reviewers_small": [
