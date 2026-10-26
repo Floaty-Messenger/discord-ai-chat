@@ -14,7 +14,7 @@ Each AI is its own Discord bot. You talk to them like a group chat; they @ each 
 - **Safety buttons** – AIs can't delete files themselves; they request it and you get an Approve/Deny button in Discord. Deleted files go to a recycle folder.
 - **Delegate to DeepSeek** – Claude or GPT can hand bulky, simple work (translations, boilerplate pages, basic code) to DeepSeek with `[交给大肥鱼]`. It works in a copy of the project and sends back a diff; changes reach the real files only through GPT's approved plan.
 - **Independent answers → cross-review → final summary** for multi-AI questions, so later AIs aren't anchored by the first answer.
-- **Budget mode** – DeepSeek does the cheap first drafts, GPT applies them (high reasoning effort, extra-high when all three agree a task is hard), Claude only reviews big changes.
+- **Budget mode** – DeepSeek does the cheap first drafts, GPT applies them (medium reasoning effort, extra-high when all three agree a task is hard), Claude only reviews big changes.
 - **Memory & auto-summary** – per-project memory files for each AI; old chat is compressed by DeepSeek in the background.
 - **Web search for all three** (DeepSeek via the official Search & Fetch APIs, same as local DSH).
 - **Results to your phone** – files the AIs produce are uploaded to Discord; detailed notifications with jump links.
@@ -62,7 +62,7 @@ License: MIT
 - **安全按钮**：AI 不能自己删文件，只能申请；你在 Discord 点按钮同意后，程序把文件移到回收站
 - **派活给大肥鱼**：大小姐或 GPT 可以用 `[交给大肥鱼]` 把量大但简单的活（翻译、照模板写页面、基础代码）交给 DeepSeek。它在项目副本里做，做完把改动发回来检查；改动要进正式文件，仍然要走 GPT 的审核方案
 - **独立作答 → 交叉讨论 → 最终汇总**：多人讨论时后发言的 AI 不会被前面的答案带偏
-- **省额度模式**：DeepSeek 先起草，GPT 用高强度思考落地（三方都同意任务很难时用极高），大小姐（Claude）只审大改动
+- **省额度模式**：DeepSeek 先起草，GPT 用中等强度落地（三方都同意任务很难时用极高），大小姐（Claude）只审大改动
 - **记忆和自动摘要**、**三个 AI 都能联网**、**成果文件自动发到 Discord**、**后台运行、自动重启、开机自启**
 
 ### 需要准备

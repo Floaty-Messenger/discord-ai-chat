@@ -148,21 +148,21 @@ def load_config(path=None):
             save_setting(cfg, ["_limit_v2"], True)
         except Exception:
             pass
-    if not cfg.get("_gpt_effort_v2"):
-        # 用户要求：GPT 平时用高强度思考，难任务（三方同意升级）用极高，别让思考强度拖累项目
+    if not cfg.get("_gpt_effort_v3"):
+        # 用户要求：GPT 平时用中等思考（闲聊不浪费），难任务（三方同意升级）用极高
         for keys in (["gpt"], ["budget_overrides", "gpt"]):
             node = cfg
             for k in keys:
                 node = node.setdefault(k, {})
-            node["effort"], node["boost_effort"] = "high", "xhigh"
+            node["effort"], node["boost_effort"] = "medium", "xhigh"
             try:
-                save_setting(cfg, keys + ["effort"], "high")
+                save_setting(cfg, keys + ["effort"], "medium")
                 save_setting(cfg, keys + ["boost_effort"], "xhigh")
             except Exception:
                 pass
-        cfg["_gpt_effort_v2"] = True
+        cfg["_gpt_effort_v3"] = True
         try:
-            save_setting(cfg, ["_gpt_effort_v2"], True)
+            save_setting(cfg, ["_gpt_effort_v3"], True)
         except Exception:
             pass
     roles = cfg.get("roles") or {}
