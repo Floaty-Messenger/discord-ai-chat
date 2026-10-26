@@ -127,7 +127,12 @@ def load_config(path=None):
         _fill_missing(cfg, json.loads(example.read_text(encoding="utf-8")))
     cfg["projects_root"] = str(Path(cfg.get("projects_root") or ROOT / "项目").expanduser())
     cfg["state_dir"] = str(Path(cfg.get("state_dir") or ROOT / "state").expanduser())
-    Path(cfg["projects_root"]).mkdir(parents=True, exist_ok=True)
+    try:
+        Path(cfg["projects_root"]).mkdir(parents=True, exist_ok=True)
+    except OSError:  # 换了一台电脑、没有那个盘：改用程序文件夹里的「项目」
+        print(f"找不到项目文件夹 {cfg['projects_root']}，改用 {ROOT / '项目'}")
+        cfg["projects_root"] = str(ROOT / "项目")
+        Path(cfg["projects_root"]).mkdir(parents=True, exist_ok=True)
     Path(cfg["state_dir"]).mkdir(parents=True, exist_ok=True)
     if cfg.get("claude", {}).get("daily_limit") == 20 and not cfg.get("_limit_v2"):
         # 早期默认的"大小姐每天 20 次"已经取消：一次性改成不限次数（以后只在 Claude 真的报额度用完时暂停）
