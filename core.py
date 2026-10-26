@@ -325,12 +325,26 @@ class Agents:
         if self.cfg.get("mock") or not self.cfg.get("sessions", {}).get("enabled", True):
             return False
         if who == "deepseek":
-            c = self.cfg["deepseek"]
-            mode = c.get("mode", "auto")
-            return mode == "api" or (mode == "auto" and not shutil.which(c.get("dsh_command", "dsh")))
+            return self._ds_route(False) == "api"
         return who in ("claude", "gpt")
 
-    async def ask(self, who, system_prompt, prompt, workdir, write=False, session=None, boost=False):
+    def _ds_key(self):
+        key = self.cfg["deepseek"].get("api_key") or os.environ.get("DEEPSEEK_API_KEY") or ""
+        return key if key and not key.startswith("在这里") else ""
+
+    def _ds_route(self, files):
+        """双重省：要动文件的活（派活）用本地 DSH，在项目副本里直接改；
+        聊天、审方案走 API，接着上次的对话、只发新消息。缺哪个就用另一个。"""
+        c = self.cfg["deepseek"]
+        mode = c.get("mode", "auto")
+        if mode in ("api", "dsh"):
+            return mode
+        has_dsh = bool(shutil.which(c.get("dsh_command", "dsh")))
+        if files:
+            return "dsh" if has_dsh else "api"
+        return "api" if self._ds_key() or not has_dsh else "dsh"
+
+    async def ask(self, who, system_prompt, prompt, workdir, write=False, session=None, boost=False, files=False):
         self.last_session[who] = None
         self.boost = boost  # 三方同意的"高强度"任务：用更高的思考强度
         if self.cfg.get("mock"):
@@ -340,7 +354,7 @@ class Agents:
         if who == "gpt":
             return await self._gpt(system_prompt, prompt, workdir, write, session)
         if who == "deepseek":
-            return await self._deepseek(system_prompt, prompt, workdir, session)
+            return await self._deepseek(system_prompt, prompt, workdir, session, files)
         raise ValueError(who)
 
     async def _claude(self, system_prompt, prompt, workdir, session=None):
@@ -442,22 +456,26 @@ class Agents:
         finally:
             _rm(last)
 
-    async def _deepseek(self, system_prompt, prompt, workdir, session=None):
-        """优先用本地的 DSH（DeepSeek Harness，能联网、能看项目文件）；找不到或出错时退回 API。"""
+    async def _deepseek(self, system_prompt, prompt, workdir, session=None, files=False):
+        """files=True：派活，在项目副本里用本地 DSH 直接改文件；否则（聊天）优先走 API。"""
         c = self.cfg["deepseek"]
-        mode = c.get("mode", "auto")
-        if mode in ("auto", "dsh"):
+        route = self._ds_route(files)
+        if route == "dsh":
             exe = shutil.which(c.get("dsh_command", "dsh"))
-            if exe:
-                try:
-                    return await self._dsh(exe, system_prompt, prompt, workdir)
-                except Exception as e:
-                    if mode == "dsh":
-                        raise
-                    log("本地 DSH 调用失败，改用 API：", str(e)[:200])
-            elif mode == "dsh":
+            if not exe:
                 raise RuntimeError("找不到本地 DSH 命令（dsh），请先运行 install_dsh.bat")
-        return await self._deepseek_api(system_prompt, prompt, session)
+            if not files:  # 聊天时不在正式项目文件夹里跑 DSH，免得它顺手改文件
+                workdir = Path(workdir) / CHAT_DIR / "大肥鱼工作区" / "聊天"
+                workdir.mkdir(parents=True, exist_ok=True)
+                (workdir.parent / ".gitignore").write_text("*\n", encoding="utf-8")
+                workdir = str(workdir)
+            try:
+                return await self._dsh(exe, system_prompt, prompt, workdir)
+            except Exception as e:
+                if c.get("mode") == "dsh" or not self._ds_key():
+                    raise
+                log("本地 DSH 调用失败，改用 API：", str(e)[:200])
+        return await self._deepseek_api(system_prompt, prompt, None if files else session)
 
     async def _dsh(self, exe, system_prompt, prompt, workdir):
         c = self.cfg["deepseek"]
@@ -474,8 +492,7 @@ class Agents:
         system = "你是群聊记录员，只负责把旧对话压缩成摘要。只输出摘要本身，不要寒暄。"
         if self.cfg.get("mock"):
             return "- （模拟摘要）" + str(prompt.count("[#")) + " 条旧消息的要点"
-        key = self.cfg["deepseek"].get("api_key") or os.environ.get("DEEPSEEK_API_KEY")
-        if key and not key.startswith("在这里"):
+        if self._ds_key():
             return await self._deepseek_api(system, prompt)
         return await self._deepseek(system, prompt, workdir)
 
@@ -1658,10 +1675,11 @@ class GroupChat:
                   "只做任务说的事，别自由发挥；不能删除文件；不要碰密码、密钥、.git 和 .群聊 文件夹。")
         prompt = (f"【任务】\n{task}\n\n【项目文件列表】\n{listing}\n\n"
                   + ("【相关文件当前内容】\n" + "\n\n".join(shown) + "\n\n" if shown else "")
-                  + "【交付格式】每个要新建或修改的文件，输出完整内容（不是片段）：\n"
+                  + "【交付格式】你的工作文件夹就是项目副本，能直接改文件就直接改。"
+                    "不能直接改的话，每个要新建或修改的文件输出完整内容（不是片段）：\n"
                     "=== 文件: 相对路径 ===\n完整内容\n=== 结束 ===\n"
                     "没改的文件不要输出。最后单独一行写：说明：一句话说清做了什么、还有什么没做。")
-        reply = await self.agents.ask("deepseek", system, prompt, str(ws))
+        reply = await self.agents.ask("deepseek", system, prompt, str(ws), files=True)
         root = ws.resolve()
         for m in FILE_BLOCK_RE.finditer(reply):
             rel = m.group(1).strip().strip("`\"'").replace("\\", "/")
