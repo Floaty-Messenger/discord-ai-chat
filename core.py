@@ -72,6 +72,7 @@ BIG_RE = re.compile(r"\[大改动\]|删除|删掉|花钱|付费|改方向|重构
 ROUNDS_RE = re.compile(r"(\d{1,3})\s*(?:轮|回合|個?輪|rounds?)", re.I)
 INDEP_RE = re.compile(r"独立|各自|分别|independent", re.I)
 PLAN_RE = re.compile(r"^[ \t]*(?:#+\s*)?\[方案\]", re.M)
+PC_RE = re.compile(r"^[ \t]*\[用电脑\]\s*(.+)", re.M)
 VERIFY_RE = re.compile(r"^[ \t]*\[我来验证\]\s*(.+)", re.S | re.M)
 DELEGATE_RE = re.compile(r"^[ \t]*\[交给大肥鱼\]\s*(.+)", re.S | re.M)
 FILE_BLOCK_RE = re.compile(r"^=== 文件[:：]\s*(.+?)\s*===[ \t]*\n(.*?)\n=== 结束 ===", re.S | re.M)
@@ -100,7 +101,7 @@ _DELEGATE = "- 量大但简单的活可以派给 DeepSeek：单独一行写 [交
 GUIDE_BY_AGENT = {
     "gpt": "- 只有你能改正式文件、跑命令、用 Computer Use。先发 [方案]（改什么、为什么，大改动标 [大改动]），审核通过的那一轮才有权限；做完说明改了什么、怎么验证；改项目外的东西先说明怎么还原。\n" + _DELEGATE,
     "claude": "- 非跑不可才能确定时，单独一行写 [我来验证] 验证什么：程序在项目副本里让你写文件、跑 Python/Node/测试，结果发回群里（很耗你的额度）。\n- 不能改正式文件、不能操作桌面，需要时 @GPT [代操作]。可以 [撤回 #编号] 原因（明显误导的 AI 消息）；确实需要新项目时 [新频道] 名字。\n" + _DELEGATE,
-    "deepseek": "- 你不能改正式文件、不能操作桌面，需要时 @GPT [代操作] 做什么。",
+    "deepseek": "- 你不能直接改正式文件。需要操作电脑时单独一行写 [用电脑] 要做什么：大小姐和 GPT 都同意后，那一轮用本地 DSH 操作电脑，做完说明结果；其他时候需要动手就 @GPT [代操作]。",
 }
 
 ROLES_DEFAULT = {
@@ -372,7 +373,7 @@ class Agents:
         return "api" if self._ds_key() or not has_dsh else "dsh"
 
     async def ask(self, who, system_prompt, prompt, workdir, write=False, session=None, boost=False, files=False,
-                  tools=None, images=None):
+                  tools=None, images=None, computer=False):
         self.last_session[who] = None
         self.boost = boost  # 三方同意的"高强度"任务：用更高的思考强度
         if self.cfg.get("mock"):
@@ -382,7 +383,7 @@ class Agents:
         if who == "gpt":
             return await self._gpt(system_prompt, prompt, workdir, write, session)
         if who == "deepseek":
-            return await self._deepseek(system_prompt, prompt, workdir, session, files, images)
+            return await self._deepseek(system_prompt, prompt, workdir, session, files, images, computer)
         raise ValueError(who)
 
     async def _claude(self, system_prompt, prompt, workdir, session=None, tools=None):
@@ -491,9 +492,15 @@ class Agents:
         finally:
             _rm(last)
 
-    async def _deepseek(self, system_prompt, prompt, workdir, session=None, files=False, images=None):
+    async def _deepseek(self, system_prompt, prompt, workdir, session=None, files=False, images=None,
+                        computer=False):
         """files=True：派活，在项目副本里用本地 DSH 直接改文件；否则（聊天）优先走 API。"""
         c = self.cfg["deepseek"]
+        if computer:  # 审核通过的「用电脑」回合：必须用本地 DSH（API 没法操作电脑）
+            exe = shutil.which(c.get("dsh_command", "dsh"))
+            if not exe:
+                raise RuntimeError("这台电脑没装本地 DSH，没法用电脑")
+            return await self._dsh(exe, system_prompt, prompt, workdir, c.get("computer_profile") or None)
         route = self._ds_route(files)
         if route == "dsh":
             exe = shutil.which(c.get("dsh_command", "dsh"))
@@ -512,9 +519,9 @@ class Agents:
                 log("本地 DSH 调用失败，改用 API：", str(e)[:200])
         return await self._deepseek_api(system_prompt, prompt, None if files else session, images=images)
 
-    async def _dsh(self, exe, system_prompt, prompt, workdir):
+    async def _dsh(self, exe, system_prompt, prompt, workdir, profile=None):
         c = self.cfg["deepseek"]
-        args = [exe, "--profile", c.get("dsh_profile", "headless")]
+        args = [exe, "--profile", profile or c.get("dsh_profile", "headless")]
         code, out, err = await run_cmd(args, system_prompt + "\n\n" + prompt,
                                        workdir, c.get("timeout", 600))
         text = out.strip()
@@ -961,6 +968,7 @@ class GroupChat:
         self.brainstorm = False
         self.boost_vote = None # 正在投票的高强度申请
         self.write_ok = False  # 方案三方通过后，GPT 下一轮可以改文件
+        self.pc_ok = False     # DeepSeek 的用电脑申请通过后，它下一轮用本地 DSH 操作电脑
 
     # ---- 历史
     def _read_all(self):
@@ -1246,12 +1254,15 @@ class GroupChat:
                     out.append(str(fp))
         return out[-4:]
 
-    async def _ask(self, who, write):
+    async def _ask(self, who, write, computer=False):
         """调用一个 AI：能续接就续接（只发新消息），续接失败自动开新会话。"""
         sc = self.cfg.get("sessions", {})
         st = self.sessions.get(who)
         seen_now = max((m.get("id", 0) for m in self.history), default=0)
         workdir = str(self.project.dir)
+        if computer:  # 用电脑回合：本地 DSH 不记事，给完整上下文；不动 API 那边的长期会话
+            prompt = self._context_head(who) + self._prompt(who)
+            return await self.agents.ask(who, self._system_prompt(who), prompt, workdir, computer=True)
         if who == "deepseek" and self.agents.supports_session(who):
             ds_file = str(self.project.chat_dir / "deepseek-会话.json")
         else:
@@ -1315,12 +1326,16 @@ class GroupChat:
         if not self._consensus_on():
             return ""
         p = self.plan
-        if who == "gpt":
+        if who == "gpt" and not (p and p.get("author") == "deepseek"):
             if self.write_ok and p:
                 return f"【权限】方案 #{p['id']} 已通过，这一轮可以动手，只做方案里的改动。\n\n"
             return ""  # 平时只读的规则已经写在群聊须知里，不用每次重复
+        if who == "deepseek" and getattr(self, "pc_ok", False) and p:
+            return f"【权限】你的用电脑申请 #{p['id']} 已通过，这一轮用本地 DSH 操作电脑，只做申请里的事，做完说明结果。\n\n"
         if p and who in p["reviewers"] and who not in p["votes"]:
-            return f"【审核】请审 GPT 的方案 #{p['id']}：写 [同意]，或 [反对] 加具体改法。\n\n"
+            what = "用电脑申请" if p.get("author") == "deepseek" else "方案"
+            return (f"【审核】请审 {DISPLAY[p.get('author', 'gpt')]} 的{what} #{p['id']}："
+                    "写 [同意]，或 [反对] 加具体改法。\n\n")
         return ""
 
     def _reviewers(self, plan_text=""):
@@ -1340,15 +1355,22 @@ class GroupChat:
         if not self._consensus_on():
             return False
         text = entry["text"]
-        if nxt == "gpt" and PLAN_RE.search(text) and not wrote:
-            reviewers, missing = self._reviewers(text)
+        pc = nxt == "deepseek" and PC_RE.search(text) and not wrote
+        if (nxt == "gpt" and PLAN_RE.search(text) and not wrote) or pc:
+            if pc:  # 用电脑一律当大改动：大小姐和 GPT 都要同意
+                reviewers = [r for r in ("claude", "gpt")
+                             if not (r == "claude" and self.usage.claude_unavailable(self.cfg))]
+                missing = [r for r in ("claude", "gpt") if r not in reviewers]
+            else:
+                reviewers, missing = self._reviewers(text)
             self.plan = {"id": entry["id"], "reviewers": reviewers, "votes": {}, "missing": missing,
-                         "msg": entry}
+                         "msg": entry, "author": nxt}
             if not reviewers:
                 await self._check_votes(queue)
                 return True
             names = "、".join(DISPLAY[r] for r in reviewers)
-            await self.send("system", f"📋 GPT 提交了方案 #{entry['id']}，等 {names} 审核")
+            what = "申请用电脑" if pc else "提交了方案"
+            await self.send("system", f"📋 {DISPLAY[nxt]} {what} #{entry['id']}，等 {names} 审核")
             for r in reviewers:
                 if r not in queue:
                     queue.append(r)
@@ -1374,10 +1396,15 @@ class GroupChat:
                                       "你来决定：发 !批准 或 !否决 原因")
             await self._ask_approval(p)
             return
+        author = p.get("author", "gpt")
         if p["votes"] and all(p["votes"].values()):
-            self.write_ok = True
+            if author == "deepseek":
+                self.pc_ok = True
+            else:
+                self.write_ok = True
             self.rejects = 0
-            await self.send("system", f"✅ 方案 #{p['id']} 审核通过（{'、'.join(DISPLAY[r] for r in p['votes'])} 同意），GPT 开始改文件")
+            act = "DeepSeek 开始用电脑" if author == "deepseek" else "GPT 开始改文件"
+            await self.send("system", f"✅ #{p['id']} 审核通过（{'、'.join(DISPLAY[r] for r in p['votes'])} 同意），{act}")
         else:
             no = "、".join(DISPLAY[r] for r, v in p["votes"].items() if not v) or "没人能审核"
             self.rejects = getattr(self, "rejects", 0) + 1
@@ -1388,11 +1415,11 @@ class GroupChat:
                 await self._ask_approval(p)
                 self.rejects = 0
                 return
-            await self.send("system", f"❌ 方案 #{p['id']} 没通过（{no} 反对），GPT 修改方案")
+            await self.send("system", f"❌ #{p['id']} 没通过（{no} 反对），{DISPLAY[author]} 修改后再提")
             self.plan = None
-        if "gpt" in queue:
-            queue.remove("gpt")
-        queue.insert(0, "gpt")
+        if author in queue:
+            queue.remove(author)
+        queue.insert(0, author)
 
     async def _ask_approval(self, p):
         """需要你拍板时：Discord 里弹出【批准】【否决】按钮；没有按钮的地方就 @你。"""
@@ -1405,14 +1432,14 @@ class GroupChat:
             if not self.plan or self.plan["id"] != pid:
                 return "这个方案已经处理过了。"
             await self.approve(True)
-            return f"✅ 你批准了方案 #{pid}，GPT 开始改"
+            return f"✅ 你批准了 #{pid}"
 
         async def no():
             if not self.plan or self.plan["id"] != pid:
                 return "这个方案已经处理过了。"
             await self.approve(False)
-            return f"❌ 你否决了方案 #{pid}，GPT 重新出方案"
-        await self.choice(f"📋 GPT 的方案 `#{pid}` 等你拍板：{notice_snippet(p['msg'], 'done')}",
+            return f"❌ 你否决了 #{pid}"
+        await self.choice(f"📋 {DISPLAY[p.get('author', 'gpt')]} 的申请 `#{pid}` 等你拍板：{notice_snippet(p['msg'], 'done')}",
                           [("批准", "success", yes), ("否决", "danger", no)])
 
     # ---- 成果文件：AI 回复里提到的文件自动发到 Discord；其他 AI 默认不打开，GPT 或你让它看才看
@@ -1558,12 +1585,18 @@ class GroupChat:
         if not self.plan:
             return "现在没有待审核的方案。"
         pid = self.plan["id"]
+        who = self.plan.get("author", "gpt")
+        at = "@DeepSeek" if who == "deepseek" else "@GPT"
         if ok:
-            self.write_ok = True
-            msg = f"我批准了方案 #{pid}。@GPT 开始改文件。"
+            if who == "deepseek":
+                self.pc_ok = True
+                msg = f"我批准了 #{pid}。{at} 开始用电脑。"
+            else:
+                self.write_ok = True
+                msg = f"我批准了方案 #{pid}。{at} 开始改文件。"
         else:
             self.plan = None
-            msg = f"我否决了方案 #{pid}" + (f"：{reason}" if reason else "") + "。@GPT 重新出方案。"
+            msg = f"我否决了 #{pid}" + (f"：{reason}" if reason else "") + f"。{at} 修改后再提。"
         await self.user_message(msg)
         return None
 
@@ -1749,13 +1782,15 @@ class GroupChat:
                 log(f"[{self.project.name}] → {nxt}" + (f"（之后：{'、'.join(queue)}）" if queue else ""))
                 failed = False
                 write = nxt == "gpt" and self.write_ok
+                pc = nxt == "deepseek" and getattr(self, "pc_ok", False)
                 try:
                     async with self.thinking(nxt):
-                        reply = await self._ask(nxt, write)
+                        reply = await self._ask(nxt, write, computer=pc)
                 except Exception as e:
                     reply, failed = f"⚠️ 调用失败：{e}", True
-                if write:  # 一个方案只换一轮写权限
+                if write or pc:  # 一个方案只换一轮权限
                     self.write_ok = False
+                    self.pc_ok = False
                     self.plan = None
                 self.rounds += 1
                 if not failed and (not reply or PASS_RE.match(reply)):
@@ -1779,7 +1814,7 @@ class GroupChat:
                         await self._boost_votes(nxt, entry, queue)
                         if await self._task_flow(nxt, entry, queue):
                             pass
-                        elif not await self._consensus(nxt, entry, queue, wrote=write):
+                        elif not await self._consensus(nxt, entry, queue, wrote=write or pc):
                             await self._enqueue(queue, entry)
                 if failed:
                     tmf = self.task_meta

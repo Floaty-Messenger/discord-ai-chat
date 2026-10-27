@@ -61,7 +61,8 @@
     "model": "deepseek-flash",
     "monthly_token_cap": 20000000,
     "timeout": 300,
-    "web_search": true
+    "web_search": true,
+    "computer_profile": ""
   },
   "git": {
     "auto_init": true,
