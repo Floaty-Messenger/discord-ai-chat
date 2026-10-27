@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import contextlib
 import io
+import json
 import os
 import re
 import sys
@@ -49,6 +50,7 @@ HELP = ("命令：\n"
         "!新项目 名字　新建一个项目频道和文件夹\n"
         "!下线　　　　关闭整个群聊程序（三个机器人都下线）\n"
         "!重启　　　　所有电脑上的群聊重启一次（约 1 分钟，用来让新代码生效）\n"
+        "!开机　　　　让值班的电脑通过局域网把其他关着的电脑叫醒（可以写电脑名）\n"
         "!撤回 编号　　撤回一条 AI 消息（从所有 AI 的上下文里拿掉，原文留在记录里）\n"
         "!批准 / !否决 原因　亲自拍板 GPT 提交的改文件方案\n"
         "不 @ 任何人默认交给 GPT。")
@@ -187,6 +189,43 @@ def _has_battery():
         return False
 
 
+def _local_macs():
+    """本机网卡的 MAC 地址（给别的电脑远程开机用）。"""
+    macs = []
+    if sys.platform == "win32":
+        import subprocess
+        with contextlib.suppress(Exception):
+            out = subprocess.run(["getmac", "/fo", "csv", "/nh"], capture_output=True, text=True,
+                                 errors="replace", timeout=10).stdout
+            for line in out.splitlines():
+                m = re.match(r'\s*"([0-9A-Fa-f]{2}(?:-[0-9A-Fa-f]{2}){5})"', line)
+                if m and m.group(1).upper() not in macs:
+                    macs.append(m.group(1).upper())
+    if not macs:
+        import uuid
+        n = uuid.getnode()
+        if not (n >> 40) & 1:  # 不是随机生成的地址
+            macs.append("-".join(f"{(n >> s) & 0xff:02X}" for s in range(40, -1, -8)))
+    return macs[:4]
+
+
+def wake_on_lan(macs):
+    """发「网络唤醒」魔术包：同一局域网里、开了网络唤醒的电脑会开机。"""
+    import socket
+    sent = 0
+    for mac in macs:
+        raw = bytes.fromhex(mac.replace("-", "").replace(":", ""))
+        if len(raw) != 6:
+            continue
+        pkt = b"\xff" * 6 + raw * 16
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+            sk.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            for port in (9, 7):
+                sk.sendto(pkt, ("255.255.255.255", port))
+        sent += 1
+    return sent
+
+
 class HostCoordinator:
     """
     多台电脑同时开着时，只让一台回复（值班），其他待命。
@@ -209,6 +248,11 @@ class HostCoordinator:
         self.active = False          # 先确认没人在值班再上岗，避免两台同时回复
         self.started = time.time()
         self.peers = {}              # 电脑名 -> (优先级, 最后心跳)
+        self.macs = _local_macs()
+        self.known_macs = {}         # 电脑名 -> [MAC]（从心跳里学到的，关机了也记得）
+        self._macs_file = Path(cfg.get("state_dir", ".")) / "peers.json"
+        with contextlib.suppress(Exception):
+            self.known_macs = json.loads(self._macs_file.read_text(encoding="utf-8"))
         self.my_msg = None
         self.ch = None
         self.running = False
@@ -226,6 +270,23 @@ class HostCoordinator:
              + ("，正在值班" if self.active else "，待命中")
         others = "；".join(f"{n}（优先级 {v[0]}）" for n, v in live.items()) or "无"
         return f"🖥 {me}\n其他在线电脑：{others}"
+
+    def wake(self, target=""):
+        """!开机：叫醒没在线的电脑。返回给用户看的说明。"""
+        now = time.time()
+        names = [n for n in self.known_macs if n != self.name
+                 and (not target or target.lower() in n.lower())
+                 and not (n in self.peers and now - self.peers[n][1] < self.FRESH)]
+        if not names:
+            if not self.known_macs:
+                return "还不认识别的电脑：它至少要在这个群聊里上线过一次，本机才能记住它的网卡地址。"
+            return "没有找到需要开机的电脑（要开的电脑可能已经在线了）。"
+        done = []
+        for n in names:
+            if wake_on_lan(self.known_macs[n]):
+                done.append(n)
+        return (f"🔌 已向 {'、'.join(done)} 发送开机信号（网络唤醒）。如果 2 分钟内没上线，"
+                "看看那台电脑有没有插网线、有没有在 BIOS 和网卡设置里打开网络唤醒。") if done else "开机信号发送失败。"
 
     async def broadcast(self, word):
         """通知其他电脑：STOP = 一起下线，RESTART = 一起重启。"""
@@ -262,7 +323,8 @@ class HostCoordinator:
 
     async def _tick(self):
         now = int(time.time())
-        stamp = f"HEARTBEAT name={self.name} priority={self.priority} active={int(self.active)} ts={now}"
+        stamp = (f"HEARTBEAT name={self.name} priority={self.priority} active={int(self.active)} ts={now}"
+                 + (f" mac={','.join(self.macs)}" if self.macs else ""))
         if self.my_msg:
             await self.my_msg.edit(content=stamp)
         else:
@@ -291,6 +353,10 @@ class HostCoordinator:
                 with contextlib.suppress(Exception):
                     await m.delete()
                 continue
+            if name and kv.get("mac") and self.known_macs.get(name) != kv["mac"].split(","):
+                self.known_macs[name] = kv["mac"].split(",")
+                with contextlib.suppress(Exception):
+                    self._macs_file.write_text(json.dumps(self.known_macs, ensure_ascii=False), encoding="utf-8")
             if name and now - ts < self.FRESH and name not in self.peers:
                 self.peers[name] = (int(kv.get("priority", 99)), ts, kv.get("active") == "1")
         mine = self._key(self.name, self.priority)
@@ -649,6 +715,9 @@ def run_discord(cfg):
             else:
                 r = await create_project(m.channel, parts[1].strip(), listener_key)
             await post(m.channel, "system", r, {})
+            return
+        if text.startswith("!开机"):
+            await post(m.channel, "system", host.wake(text[3:].strip()), {})
             return
         if text in ("!重启", "!restart"):
             await post(m.channel, "system", "♻️ 所有电脑上的群聊正在重启，大约 1 分钟后回来。", {})
