@@ -8,6 +8,7 @@ AI 群聊核心：接力 + @路由 + 停止规则 + 三个 AI 的调用 + 每个
 <安装文件夹>/项目/<项目名>/.群聊/ ← 这个项目的聊天记录
 """
 import asyncio
+import base64
 import contextlib
 import json
 import os
@@ -371,7 +372,7 @@ class Agents:
         return "api" if self._ds_key() or not has_dsh else "dsh"
 
     async def ask(self, who, system_prompt, prompt, workdir, write=False, session=None, boost=False, files=False,
-                  tools=None):
+                  tools=None, images=None):
         self.last_session[who] = None
         self.boost = boost  # 三方同意的"高强度"任务：用更高的思考强度
         if self.cfg.get("mock"):
@@ -381,7 +382,7 @@ class Agents:
         if who == "gpt":
             return await self._gpt(system_prompt, prompt, workdir, write, session)
         if who == "deepseek":
-            return await self._deepseek(system_prompt, prompt, workdir, session, files)
+            return await self._deepseek(system_prompt, prompt, workdir, session, files, images)
         raise ValueError(who)
 
     async def _claude(self, system_prompt, prompt, workdir, session=None, tools=None):
@@ -490,7 +491,7 @@ class Agents:
         finally:
             _rm(last)
 
-    async def _deepseek(self, system_prompt, prompt, workdir, session=None, files=False):
+    async def _deepseek(self, system_prompt, prompt, workdir, session=None, files=False, images=None):
         """files=True：派活，在项目副本里用本地 DSH 直接改文件；否则（聊天）优先走 API。"""
         c = self.cfg["deepseek"]
         route = self._ds_route(files)
@@ -509,7 +510,7 @@ class Agents:
                 if c.get("mode") == "dsh" or not self._ds_key():
                     raise
                 log("本地 DSH 调用失败，改用 API：", str(e)[:200])
-        return await self._deepseek_api(system_prompt, prompt, None if files else session)
+        return await self._deepseek_api(system_prompt, prompt, None if files else session, images=images)
 
     async def _dsh(self, exe, system_prompt, prompt, workdir):
         c = self.cfg["deepseek"]
@@ -530,7 +531,7 @@ class Agents:
             return await self._deepseek_api(system, prompt, search=False)
         return await self._deepseek(system, prompt, workdir)
 
-    async def _deepseek_api(self, system_prompt, prompt, session=None, search=True):
+    async def _deepseek_api(self, system_prompt, prompt, session=None, search=True, images=None):
         """session = 这个项目的对话文件。API 本身不记事，所以程序把整段对话存下来每次一起发；
         前面不变的部分 DeepSeek 会自动缓存，按"缓存命中"的便宜价格计费。"""
         c = self.cfg["deepseek"]
@@ -549,7 +550,22 @@ class Agents:
         if not msgs:
             msgs = [{"role": "system", "content": system_prompt}]
         msgs.append({"role": "user", "content": prompt})
-        text = await self._deepseek_chat(c, key, msgs, search and c.get("web_search", True))
+        send = msgs
+        if images:  # V4.1-Flash-1017 能看图：这一轮把图片一起发过去（会话里只记文字，不存图片本身）
+            parts = [{"type": "text", "text": prompt}]
+            for f in images:
+                try:
+                    raw = Path(f).read_bytes()
+                except Exception:
+                    continue
+                kind = {b"\x89PNG": "png", b"GIF8": "gif", b"RIFF": "webp"}.get(raw[:4], "jpeg")
+                parts.append({"type": "image_url", "image_url": {
+                    "url": f"data:image/{kind};base64," + base64.b64encode(raw).decode()}})
+            if len(parts) > 1:
+                send = msgs[:-1] + [{"role": "user", "content": parts}]
+                msgs[-1]["content"] = prompt + "\n（附图：" + "、".join(Path(f).name for f in images) + "）"
+                log(f"DeepSeek 这一轮看了 {len(parts) - 1} 张图")
+        text = await self._deepseek_chat(c, key, send, search and c.get("web_search", True))
         if session:
             msgs.append({"role": "assistant", "content": text})
             Path(session).write_text(json.dumps(msgs, ensure_ascii=False), encoding="utf-8")
@@ -1203,6 +1219,33 @@ class GroupChat:
             return "【强度】这个任务已升级为高强度，做完写 [完成] 后自动恢复。\n\n"
         return ""
 
+    IMG_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+
+    def _may_view(self, m, who):
+        """能不能看这条消息的附件：你发的（@ 了它，或者没 @ 任何人），或者你/GPT 叫它看的。"""
+        if who in self.grants.get(str(m.get("id")), []):
+            return True
+        if m.get("who") == "user":
+            text = m.get("text", "")
+            named = [a for a in AGENTS if MENTION_RE[a].search(text)]
+            return not named or who in named
+        return False
+
+    def _images_for(self, who, after_id):
+        """DeepSeek（API）自己打不开文件：把它被允许看的新图片直接发给它（最多 4 张、每张 20MB 以内）。
+        允许看 = 你 @ 它时附带的图，或者你/GPT 叫它看的那条消息的图。"""
+        out = []
+        for m in self.history:
+            if m.get("id", 0) <= after_id or not m.get("files"):
+                continue
+            if not self._may_view(m, who):
+                continue
+            for f in m["files"]:
+                fp = Path(f)
+                if fp.suffix.lower() in self.IMG_EXT and fp.is_file() and fp.stat().st_size < 20 * 1024 * 1024:
+                    out.append(str(fp))
+        return out[-4:]
+
     async def _ask(self, who, write):
         """调用一个 AI：能续接就续接（只发新消息），续接失败自动开新会话。"""
         sc = self.cfg.get("sessions", {})
@@ -1213,11 +1256,14 @@ class GroupChat:
             ds_file = str(self.project.chat_dir / "deepseek-会话.json")
         else:
             ds_file = None
+        imgs = None
+        if who == "deepseek" and self.agents._ds_route(False) == "api":
+            imgs = self._images_for(who, st.get("seen", 0) if st else max(0, seen_now - 30))
         if st and self.agents.supports_session(who) and st.get("turns", 0) < sc.get("max_turns", 40):
             prompt, told = self._delta_prompt(who, st)
             try:
                 reply = await self.agents.ask(who, self._system_prompt(who), prompt, workdir, write=write,
-                                              session=ds_file or st["id"], boost=self.boost)
+                                              session=ds_file or st["id"], boost=self.boost, images=imgs)
                 st.update(seen=seen_now, turns=st.get("turns", 0) + 1, mem=self._memory_hash(who),
                           told_retract=st.get("told_retract", []) + told,
                           hidden=[m["id"] for m in self.history if self._hidden_for(who, m)])
@@ -1235,7 +1281,7 @@ class GroupChat:
         prompt = self._context_head(who) + self._prompt(who)
         try:
             reply = await self.agents.ask(who, self._system_prompt(who), prompt, workdir, write=write,
-                                          session=ds_file, boost=self.boost)
+                                          session=ds_file, boost=self.boost, images=imgs)
         except Exception as e:
             self._note_quota(who, str(e).lower())
             raise
@@ -1392,9 +1438,9 @@ class GroupChat:
         """给某个 AI 看的消息文字：附件默认只显示名字，被允许看时才给路径。"""
         text = m["text"]
         files = m.get("files") or []
-        if not files or viewer == m["who"]:
-            return text
-        allowed = viewer in self.grants.get(str(m["id"]), [])
+        if not files or viewer == m["who"] or m["who"] == "user":
+            return text  # 你发的附件：消息里本来就写着保存位置，照旧
+        allowed = self._may_view(m, viewer)
         for f in files:
             name = Path(f).name
             for variant in {f, f.replace("\\", "/"), f.replace("/", "\\")}:
@@ -1540,8 +1586,8 @@ class GroupChat:
                 f"\n\n=== 现在轮到你（{DISPLAY[who]}）发言。直接写你要发到群里的内容。===")
 
     # ---- 对外接口
-    async def user_message(self, text, dc_id=None):
-        self._append("user", text, [dc_id] if dc_id else None)
+    async def user_message(self, text, dc_id=None, files=None):
+        self._append("user", text, [dc_id] if dc_id else None, files=files)
         if self.task and not self.task.done():
             self.interrupted = True  # 当前 AI 说完后，按你这条消息重新路由
             return

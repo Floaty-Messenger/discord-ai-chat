@@ -759,7 +759,7 @@ def run_discord(cfg):
         if saved:
             text += "\n（附件已保存到项目文件夹：" + "、".join(saved) + "）"
         if text:
-            await chat.user_message(text, m.id)
+            await chat.user_message(text, m.id, [str(chat.project.dir / f) for f in saved] or None)
 
     async def main():
         try:
