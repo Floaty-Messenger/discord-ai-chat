@@ -48,6 +48,7 @@ HELP = ("命令：\n"
         "!旅行 开/关　旅行模式：只有 DeepSeek 回复（对所有项目生效）\n"
         "!新项目 名字　新建一个项目频道和文件夹\n"
         "!下线　　　　关闭整个群聊程序（三个机器人都下线）\n"
+        "!重启　　　　所有电脑上的群聊重启一次（约 1 分钟，用来让新代码生效）\n"
         "!撤回 编号　　撤回一条 AI 消息（从所有 AI 的上下文里拿掉，原文留在记录里）\n"
         "!批准 / !否决 原因　亲自拍板 GPT 提交的改文件方案\n"
         "不 @ 任何人默认交给 GPT。")
@@ -213,6 +214,7 @@ class HostCoordinator:
         self.running = False
         self.waiting = False
         self.after_active = None     # 上岗后：补回交接时没人接的消息
+        self.on_restart = None       # 别的电脑发了 !重启
 
     def _key(self, name, prio):
         return (prio, name)
@@ -225,11 +227,14 @@ class HostCoordinator:
         others = "；".join(f"{n}（优先级 {v[0]}）" for n, v in live.items()) or "无"
         return f"🖥 {me}\n其他在线电脑：{others}"
 
-    async def stop_all(self):
-        """!下线：通知其他电脑一起下线。"""
+    async def broadcast(self, word):
+        """通知其他电脑：STOP = 一起下线，RESTART = 一起重启。"""
         if self.ch:
             with contextlib.suppress(Exception):
-                await self.ch.send(f"STOP from={self.name} ts={int(time.time())}")
+                await self.ch.send(f"{word} from={self.name} ts={int(time.time())}")
+
+    async def stop_all(self):
+        await self.broadcast("STOP")
 
     async def run(self):
         if self.running:
@@ -268,14 +273,17 @@ class HostCoordinator:
             if m.id == self.my_msg.id:
                 continue
             words = m.content.split()
-            if not words or words[0] not in ("HEARTBEAT", "STOP"):
+            if not words or words[0] not in ("HEARTBEAT", "STOP", "RESTART"):
                 continue
             kv = dict(x.split("=", 1) for x in words[1:] if "=" in x)
-            if words[0] == "STOP":
+            if words[0] in ("STOP", "RESTART"):
                 if int(kv.get("ts", 0)) > self.started and kv.get("from") != self.name:
-                    log(f"电脑「{kv.get('from')}」发了 !下线，本机也下线")
-                    if self.on_stop:
-                        await self.on_stop()
+                    stop = words[0] == "STOP"
+                    log(f"电脑「{kv.get('from')}」发了 {'!下线，本机也下线' if stop else '!重启，本机也重启'}")
+                    self.started = time.time()  # 同一条通知只处理一次
+                    cb = self.on_stop if stop else self.on_restart
+                    if cb:
+                        await cb()
                     return
                 continue
             name, ts = kv.get("name"), int(kv.get("ts", 0))
@@ -392,6 +400,35 @@ def run_discord(cfg):
                     await on_message(last[0])
 
     host.after_active = catch_up
+
+    async def restart_self(reason):
+        """退出程序（不写 stop.flag），后台运行.bat 会在 30 秒后用新代码重新启动。"""
+        log(f"重启：{reason}")
+        for c in clients.values():
+            await c.close()
+
+    host.on_restart = lambda: restart_self("其他电脑发了 !重启")
+    code_started = []
+
+    async def code_watch():
+        """程序文件被更新（比如维护的 Claude 放了新版本）：等手上的对话都结束，自动重启让新代码生效。"""
+        if code_started:
+            return
+        code_started.append(1)
+        here = Path(__file__).resolve().parent
+        files = [here / "bot.py", here / "core.py"]
+
+        def stamp():
+            return [f.stat().st_mtime if f.exists() else 0 for f in files]
+        first = stamp()
+        while True:
+            await asyncio.sleep(60)
+            with contextlib.suppress(Exception):
+                if stamp() != first:
+                    busy = any(c.task and not c.task.done() for c in chats.values())
+                    if not busy:
+                        await restart_self("程序文件已更新，自动重启让新代码生效")
+                        return
 
     alive_started = []
 
@@ -592,6 +629,7 @@ def run_discord(cfg):
                     + (f"只管分类「{category}」下的频道。" if category else "所有文字频道都当作项目。"))
                 asyncio.create_task(host.run())
                 asyncio.create_task(alive_loop())
+                asyncio.create_task(code_watch())
 
     for key, c in clients.items():
         make_ready(key, c)
@@ -611,6 +649,11 @@ def run_discord(cfg):
             else:
                 r = await create_project(m.channel, parts[1].strip(), listener_key)
             await post(m.channel, "system", r, {})
+            return
+        if text in ("!重启", "!restart"):
+            await post(m.channel, "system", "♻️ 所有电脑上的群聊正在重启，大约 1 分钟后回来。", {})
+            await host.broadcast("RESTART")
+            await restart_self("收到 !重启")
             return
         if text in ("!下线", "!关机"):
             (Path(cfg["state_dir"]) / "stop.flag").write_text("stop", encoding="utf-8")
