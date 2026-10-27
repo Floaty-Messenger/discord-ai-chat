@@ -13,6 +13,7 @@ Each AI is its own Discord bot. You talk to them like a group chat; they @ each 
 - **Three-way approval before acting** – GPT proposes a `[方案]` (plan); the other AIs approve before it gets write access, full-PC access or Computer Use for that one turn. Hard-gated, not just a prompt rule.
 - **Safety buttons** – AIs can't delete files themselves; they request it and you get an Approve/Deny button in Discord. Deleted files go to a recycle folder.
 - **Delegate to DeepSeek** – Claude or GPT can hand bulky, simple work (translations, boilerplate pages, basic code) to DeepSeek with `[交给大肥鱼]`. It works in a copy of the project and sends back a diff; changes reach the real files only through GPT's approved plan.
+- **Verify sandbox for Claude** – Claude can write `[我来验证]` to get a project copy where she may write files and run Python/Node/tests, closing the gap where GPT was the only one able to run code.
 - **Independent answers → cross-review → final summary** for multi-AI questions, so later AIs aren't anchored by the first answer.
 - **Budget mode** – DeepSeek does the cheap first drafts, GPT applies them (medium reasoning effort, extra-high when all three agree a task is hard), Claude only reviews big changes.
 - **Memory & auto-summary** – per-project memory files for each AI; old chat is compressed by DeepSeek in the background.
